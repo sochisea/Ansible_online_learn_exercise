@@ -2,6 +2,7 @@ name: Ansible Lab — Nginx on web nodes (Docker)
 
 on:
   workflow_dispatch:
+    inputs: {}
 
 jobs:
   ansible-lab:
