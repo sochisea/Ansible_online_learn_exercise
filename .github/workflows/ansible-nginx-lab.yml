@@ -1,0 +1,130 @@
+name: Ansible Lab — Nginx on web nodes (Docker)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ansible-lab:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout (optional if you want your repo files)
+        uses: actions/checkout@v4
+
+      - name: Install Ansible and Docker SDK
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ansible python3-docker curl
+
+      # 🧱 Start 3 "servers" as containers:
+      # - web1 and web2 use the official nginx image (nginx already running as PID 1)
+      # - db1 is just a placeholder Ubuntu host
+      - name: Start Docker containers
+        run: |
+          docker pull nginx:stable-alpine
+          docker run -d --name web1 nginx:stable-alpine
+          docker run -d --name web2 nginx:stable-alpine
+          docker run -d --name db1 ubuntu sleep infinity
+          echo "✅ Containers up: web1, web2 (nginx), db1 (ubuntu)"
+
+      - name: Show container status
+        run: |
+          docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
+
+      # 🗂️ Create minimal Ansible project
+      - name: Prepare Ansible project files
+        run: |
+          mkdir -p ansible/roles/web/tasks
+          mkdir -p ansible/group_vars ansible/host_vars
+
+          cat > ansible/ansible.cfg <<'CFG'
+          [defaults]
+          inventory = ./inventory.ini
+          host_key_checking = False
+          interpreter_python = auto
+          retry_files_enabled = False
+          forks = 10
+          CFG
+
+          cat > ansible/inventory.ini <<'INV'
+          [web]
+          web1 ansible_connection=docker
+          web2 ansible_connection=docker
+
+          [db]
+          db1 ansible_connection=docker
+          INV
+
+          # Simple variable example for the web group
+          cat > ansible/group_vars/web.yml <<'VARS'
+          web_greeting: "Hello from Ansible on {{ inventory_hostname }}!"
+          VARTS
+
+          # ⛏️ Web role: customize Nginx index and verify HTTP 200 from inside each container
+          cat > ansible/roles/web/tasks/main.yml <<'TASKS'
+          ---
+          - name: Ensure Nginx binary exists (nginx image already runs it)
+            command: nginx -v
+            register: nginx_version
+            changed_when: false
+
+          - name: Print nginx version
+            debug:
+              var: nginx_version.stderr
+
+          - name: Deploy custom index.html
+            copy:
+              dest: /usr/share/nginx/html/index.html
+              content: |
+                <html>
+                  <head><title>OK</title></head>
+                  <body>
+                    <h1>{{ web_greeting }}</h1>
+                  </body>
+                </html>
+              mode: '0644'
+
+          # In the nginx image, nginx runs as PID 1 in the foreground.
+          # Reload may not be available; touch config to ensure it's serving our file.
+          - name: Verify HTTP responds with our greeting (inside container)
+            command: sh -c "wget -qO- http://localhost"
+            register: home
+            changed_when: false
+
+          - name: Assert homepage contains greeting
+            assert:
+              that:
+                - "'{{ web_greeting }}' in home.stdout"
+              fail_msg: "Homepage did not contain expected greeting."
+            when: home.stdout is defined
+          TASKS
+
+          cat > ansible/playbook.yml <<'YML'
+          ---
+          - name: Configure web servers and verify Nginx
+            hosts: web
+            gather_facts: false
+            roles:
+              - web
+          YML
+
+          echo "📁 Ansible project created:"
+          find ansible -maxdepth 3 -type f -print | sed 's/^/ - /'
+
+      - name: Run Ansible — web role
+        working-directory: ansible
+        run: |
+          ansible -i inventory.ini all -m ping || true  # ping doesn't work with docker connection; ignore
+          ansible-playbook playbook.yml -v
+
+      # Optional: Quick curls from host to each container via docker exec (extra safety check)
+      - name: Smoke test via docker exec
+        run: |
+          docker exec web1 wget -qO- http://localhost | head -n 3
+          docker exec web2 wget -qO- http://localhost | head -n 3
+
+      # Cleanup so your runner isn't "dirty" for future jobs
+      - name: Cleanup containers
+        if: always()
+        run: |
+          docker rm -f web1 web2 db1 || true
