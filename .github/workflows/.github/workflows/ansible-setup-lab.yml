@@ -1,4 +1,4 @@
-name: Ansible Lab — Package & User Setup (Docker)
+name: Ansible Lab — Package & User Setup (Docker, Python bootstrap)
 
 on:
   workflow_dispatch:
@@ -23,21 +23,20 @@ jobs:
           docker pull ubuntu:22.04
           docker run -d --name node1 ubuntu:22.04 sleep infinity
           docker run -d --name node2 ubuntu:22.04 sleep infinity
-          echo "✅ Containers created: node1, node2"
           docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
 
       - name: Prepare Ansible project
         run: |
-          mkdir -p ansible/roles/setup/tasks
+          mkdir -p ansible/roles/setup/tasks ansible/group_vars
 
-          # --- Inventory ---
+          # Inventory: connect via Docker, run as root (default), and tell Ansible where Python will be
           cat > ansible/inventory.ini <<'INV'
           [nodes]
-          node1 ansible_connection=docker
-          node2 ansible_connection=docker
+          node1 ansible_connection=docker ansible_python_interpreter=/usr/bin/python3
+          node2 ansible_connection=docker ansible_python_interpreter=/usr/bin/python3
           INV
 
-          # --- Ansible config ---
+          # ansible.cfg
           cat > ansible/ansible.cfg <<'CFG'
           [defaults]
           inventory = ./inventory.ini
@@ -47,16 +46,27 @@ jobs:
           forks = 10
           CFG
 
-          # --- Group vars ---
-          mkdir -p ansible/group_vars
+          # Group vars
           cat > ansible/group_vars/nodes.yml <<'VARS'
           new_username: devops
           message_text: "Welcome to the Ansible lab!"
           VARS
 
-          # --- Role tasks ---
+          # Role tasks
           cat > ansible/roles/setup/tasks/main.yml <<'TASKS'
           ---
+          # 0) Bootstrap Python in the bare Ubuntu containers (no sudo, run as root)
+          - name: Ensure Python is present (bootstrap via raw)
+            raw: |
+              set -e
+              export DEBIAN_FRONTEND=noninteractive
+              if ! command -v python3 >/dev/null 2>&1; then
+                apt-get update -y
+                apt-get install -y python3 python3-apt
+              fi
+            changed_when: false
+
+          # 1) Now we can use normal Ansible modules
           - name: Update apt cache
             apt:
               update_cache: yes
@@ -74,6 +84,7 @@ jobs:
               name: "{{ new_username }}"
               shell: /bin/bash
               state: present
+              create_home: yes
 
           - name: Copy message file
             copy:
@@ -92,12 +103,11 @@ jobs:
               var: user_check.stdout
           TASKS
 
-          # --- Playbook ---
+          # Playbook (no become: we're already root in containers)
           cat > ansible/playbook.yml <<'YML'
           ---
           - name: Configure Ubuntu nodes
             hosts: nodes
-            become: true
             gather_facts: false
             roles:
               - setup
@@ -105,8 +115,7 @@ jobs:
 
       - name: Run Ansible
         working-directory: ansible
-        run: |
-          ansible-playbook playbook.yml -v
+        run: ansible-playbook playbook.yml -v
 
       - name: Verify results via docker exec
         run: |
