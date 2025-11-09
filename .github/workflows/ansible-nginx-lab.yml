@@ -1,10 +1,121 @@
-name: Hello
+name: Ansible Lab — Package & User Setup (Docker)
+
 on:
   workflow_dispatch:
   push:
     branches: [ main ]
+
 jobs:
-  hi:
+  ansible-lab:
     runs-on: ubuntu-latest
+
     steps:
-      - run: echo Hello from GitHub Actions for Ansible first SCRIPT RUN Huray
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Ansible and Docker SDK
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ansible python3-docker curl
+
+      - name: Start Docker containers
+        run: |
+          docker pull ubuntu:22.04
+          docker run -d --name node1 ubuntu:22.04 sleep infinity
+          docker run -d --name node2 ubuntu:22.04 sleep infinity
+          echo "✅ Containers created: node1, node2"
+          docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
+
+      - name: Prepare Ansible project
+        run: |
+          mkdir -p ansible/roles/setup/tasks
+
+          # --- Inventory ---
+          cat > ansible/inventory.ini <<'INV'
+          [nodes]
+          node1 ansible_connection=docker
+          node2 ansible_connection=docker
+          INV
+
+          # --- Ansible config ---
+          cat > ansible/ansible.cfg <<'CFG'
+          [defaults]
+          inventory = ./inventory.ini
+          host_key_checking = False
+          interpreter_python = auto
+          retry_files_enabled = False
+          forks = 10
+          CFG
+
+          # --- Group vars ---
+          mkdir -p ansible/group_vars
+          cat > ansible/group_vars/nodes.yml <<'VARS'
+          new_username: devops
+          message_text: "Welcome to the Ansible lab!"
+          VARS
+
+          # --- Role tasks ---
+          cat > ansible/roles/setup/tasks/main.yml <<'TASKS'
+          ---
+          - name: Update apt cache
+            apt:
+              update_cache: yes
+              cache_valid_time: 600
+
+          - name: Install packages
+            apt:
+              name:
+                - curl
+                - htop
+              state: present
+
+          - name: Create a user
+            user:
+              name: "{{ new_username }}"
+              shell: /bin/bash
+              state: present
+
+          - name: Copy message file
+            copy:
+              dest: "/home/{{ new_username }}/welcome.txt"
+              content: "{{ message_text }}"
+              owner: "{{ new_username }}"
+              mode: '0644'
+
+          - name: Verify user exists
+            command: id {{ new_username }}
+            register: user_check
+            changed_when: false
+
+          - name: Display user id info
+            debug:
+              var: user_check.stdout
+          TASKS
+
+          # --- Playbook ---
+          cat > ansible/playbook.yml <<'YML'
+          ---
+          - name: Configure Ubuntu nodes
+            hosts: nodes
+            become: true
+            gather_facts: false
+            roles:
+              - setup
+          YML
+
+      - name: Run Ansible
+        working-directory: ansible
+        run: |
+          ansible-playbook playbook.yml -v
+
+      - name: Verify results via docker exec
+        run: |
+          echo "🧾 Verifying inside containers..."
+          docker exec node1 id devops
+          docker exec node1 cat /home/devops/welcome.txt
+          docker exec node2 id devops
+          docker exec node2 cat /home/devops/welcome.txt
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f node1 node2 || true
